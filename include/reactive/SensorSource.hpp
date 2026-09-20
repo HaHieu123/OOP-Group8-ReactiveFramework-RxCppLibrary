@@ -11,6 +11,19 @@
 
 namespace reactive {
 
+// ============================================================================
+// GLOBAL SCHEDULER — dùng chung cho tất cả SensorSource
+// ============================================================================
+// Tạo MỘT LẦN, tái sử dụng → đảm bảo thread không bị hủy sớm
+// ============================================================================
+inline rxcpp::observe_on_one_worker& globalScheduler() {
+    static auto scheduler = rxcpp::observe_on_new_thread();
+    return scheduler;
+}
+
+// ============================================================================
+// SensorSource
+// ============================================================================
 class SensorSource {
 public:
     SensorSource(Sensor sensor,
@@ -24,18 +37,22 @@ public:
     {}
 
     rxcpp::observable<Reading> asObservable() {
+        // Copy tất cả vào shared_ptr
         auto sensorCopy = std::make_shared<Sensor>(sensor_);
         auto baseTemp   = baseTemp_;
         auto noise      = noise_;
         auto interval   = interval_;
 
+        // Random generator
         auto rng = std::make_shared<std::mt19937>(std::random_device{}());
+
+        // DÙNG GLOBAL SCHEDULER — không tạo mới
+        auto scheduler = globalScheduler();
 
         return rxcpp::observable<>::interval(
             std::chrono::steady_clock::now(),
             interval,
-            // CHỈ ĐỊNH SCHEDULER: new_thread
-            rxcpp::synchronize_new_thread()
+            scheduler
         )
         .map([sensorCopy, baseTemp, noise, rng](int /*i*/) -> Reading {
             std::normal_distribution<double> tempDist(baseTemp, noise);

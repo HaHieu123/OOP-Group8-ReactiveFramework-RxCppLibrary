@@ -10,11 +10,11 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <exception>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -25,6 +25,8 @@
 using namespace reactive;
 using namespace std::chrono_literals;
 
+static std::mutex g_consoleMutex;
+
 int main() {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -32,13 +34,6 @@ int main() {
 #endif
 
     auto t0 = std::chrono::steady_clock::now();
-    auto logElapsed = [&t0]() {          // <-- ĐÃ ĐỔI TÊN
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0
-        ).count();
-    };
-
-    std::cerr << "[" << logElapsed() << " ms] START\n";
 
     std::cout << "===============================================\n";
     std::cout << "  Reactive Stream Processing (RxCpp) - Demo\n";
@@ -51,7 +46,6 @@ int main() {
     registry.add({3, "Temp-C", "Phong C", 20.0, 50.0});
 
     std::cout << "[CONFIG] Da dang ky " << registry.size() << " sensors\n";
-    std::cerr << "[" << logElapsed() << " ms] Registry OK\n";
 
     auto s1 = registry.find(1);
     auto s2 = registry.find(2);
@@ -64,22 +58,23 @@ int main() {
 
     constexpr auto EMIT_INTERVAL = 20ms;
 
+    std::cout << "[CONFIG] Moi sensor phat 50 Hz, chay trong 3 s\n";
+    std::cout << "[CONFIG] Chi in moi 10 alerts CRITICAL\n\n";
+    std::cout.flush();
+
+    // ========================================================================
+    // CHỈ CHẠY PIPELINE CHÍNH — BỎ WINDOW DEMO
+    // ========================================================================
+
     SensorSource src1(*s1, 50.0, 8.0, EMIT_INTERVAL);
     SensorSource src2(*s2, 45.0, 10.0, EMIT_INTERVAL);
     SensorSource src3(*s3, 30.0, 6.0, EMIT_INTERVAL);
 
-    std::cout << "[CONFIG] Da tao 3 sensor sources\n";
-    std::cout << "[CONFIG] Moi sensor phat 50 Hz, chay trong 2 s\n";
-    std::cout << "[CONFIG] Chi in moi 200 alerts CRITICAL\n\n";
-    std::cerr << "[" << logElapsed() << " ms] Sources OK\n";
-
-    // 2. Merge
     auto merged = src1.asObservable()
         .merge(src2.asObservable())
         .merge(src3.asObservable());
-    std::cerr << "[" << logElapsed() << " ms] Merge OK\n";
 
-    // 3. Sinks
+    // Sinks
     ConsoleSink<Alert> consoleSink(
         [](const Alert& a) { return a.toString(); },
         std::cout,
@@ -91,24 +86,20 @@ int main() {
         FileSink<Alert>::Format::JSON
     );
 
-    std::cerr << "[" << logElapsed() << " ms] Sinks OK\n";
-
-    // 4. Pipeline
+    // Counters
     std::atomic<std::uint64_t> totalReadings{0};
     std::atomic<std::uint64_t> validReadings{0};
     std::atomic<std::uint64_t> alertCount{0};
     std::atomic<std::uint64_t> criticalCount{0};
     std::atomic<std::uint64_t> warningCount{0};
     std::atomic<std::uint64_t> consolePrintCount{0};
-
     std::atomic<std::uint64_t> criticalBySensor[4] = {};
     std::atomic<std::uint64_t> warningBySensor[4] = {};
 
     auto consoleObserver = consoleSink.makeObserver();
     auto fileObserver    = fileSink.makeObserver();
 
-    std::cerr << "[" << logElapsed() << " ms] BEFORE subscribe\n";
-
+    // PIPELINE CHÍNH
     auto subscription = merged
         .filter([&totalReadings](const Reading& r) {
             ++totalReadings;
@@ -136,8 +127,9 @@ int main() {
                     if (a.sensorId >= 1 && a.sensorId <= 3) {
                         ++criticalBySensor[a.sensorId];
                     }
-                    if (criticalCount % 200 == 0) {
+                    if (criticalCount % 10 == 0) {
                         ++consolePrintCount;
+                        std::lock_guard<std::mutex> lock(g_consoleMutex);
                         consoleObserver.on_next(a);
                     }
                 } else {
@@ -149,32 +141,19 @@ int main() {
 
                 fileObserver.on_next(a);
             },
-            [](std::exception_ptr e) {
-                try {
-                    if (e) std::rethrow_exception(e);
-                } catch (const std::exception& ex) {
-                    std::cerr << "[ERROR] " << ex.what() << '\n';
-                }
-            },
-            []() {
-                std::cerr << "[DONE] Pipeline complete\n";
-            }
+            [](std::exception_ptr) {},
+            []() {}
         );
 
-    std::cerr << "[" << logElapsed() << " ms] AFTER subscribe\n";
-    std::cerr << "[" << logElapsed() << " ms] BEFORE sleep 2s\n";
-
-    std::this_thread::sleep_for(2s);
-
-    std::cerr << "[" << logElapsed() << " ms] AFTER sleep 2s\n";
-    std::cerr << "[" << logElapsed() << " ms] BEFORE unsubscribe\n";
+    // Chạy 3 giây
+    std::this_thread::sleep_for(3s);
 
     subscription.unsubscribe();
+    std::this_thread::sleep_for(500ms);
 
-    std::cerr << "[" << logElapsed() << " ms] AFTER unsubscribe\n";
-
-    // 5. In kết quả
-    std::cout << "\n+===================================================+\n";
+    // In kết quả
+    std::cout << "\n\n";
+    std::cout << "+===================================================+\n";
     std::cout << "|              KET QUA DO LUONG                     |\n";
     std::cout << "+===================================================+\n";
     std::cout << "| Tong so readings:       " << std::setw(8) << totalReadings.load() << "\n";
@@ -211,12 +190,5 @@ int main() {
     std::cout << "\nDemo hoan tat!\n";
 
     std::cout.flush();
-    std::cerr << "[" << logElapsed() << " ms] EXIT\n";
-    std::cerr.flush();
-
-#ifdef _WIN32
-    TerminateProcess(GetCurrentProcess(), 0);
-#else
-    std::exit(0);
-#endif
+    return 0;
 }

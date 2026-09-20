@@ -9,17 +9,23 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>      // <-- THÊM
+#include <stdexcept>
 #include <string>
 
 namespace reactive {
 
 // ============================================================================
-// Sink: wrapper cho rxcpp::subscriber
+// GLOBAL MUTEX cho console output
 // ============================================================================
+inline std::mutex& consoleMutex() {
+    static std::mutex mtx;
+    return mtx;
+}
 
-// ----------------------------------------------------------------------------
-// ConsoleSink: in ra màn hình
-// ----------------------------------------------------------------------------
+// ============================================================================
+// ConsoleSink
+// ============================================================================
 template <typename T>
 class ConsoleSink {
 public:
@@ -34,27 +40,24 @@ public:
         , useColor_(useColor)
     {}
 
-    // Trả về observer cho RxCpp
     auto makeObserver() {
         return rxcpp::make_observer<T>(
-            // onNext
             [this](const T& value) {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<std::mutex> lock(consoleMutex());   // <-- KHÓA
                 const std::string s = formatter_(value);
                 *out_ << (useColor_ ? colorize(s) : s) << '\n';
+                out_->flush();
             },
-            // onError
             [this](std::exception_ptr e) {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<std::mutex> lock(consoleMutex());
                 try {
                     if (e) std::rethrow_exception(e);
                 } catch (const std::exception& ex) {
                     *out_ << "[ERROR] " << ex.what() << '\n';
                 }
             },
-            // onComplete
             [this]() {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<std::mutex> lock(consoleMutex());
                 *out_ << "[DONE] Console sink hoan tat\n";
                 out_->flush();
             }
@@ -65,7 +68,6 @@ private:
     Formatter     formatter_;
     std::ostream* out_;
     bool          useColor_;
-    std::mutex    mutex_;
 
     static std::string defaultFormat(const T& v) {
         if constexpr (requires { v.toString(); }) {
@@ -88,9 +90,9 @@ private:
     }
 };
 
-// ----------------------------------------------------------------------------
-// FileSink: ghi ra file CSV/JSON
-// ----------------------------------------------------------------------------
+// ============================================================================
+// FileSink
+// ============================================================================
 template <typename T>
 class FileSink {
 public:
@@ -107,26 +109,35 @@ public:
     }
 
     ~FileSink() {
-        if (file_.is_open()) file_.flush();
+        try {
+            if (file_.is_open()) file_.flush();
+        } catch (...) {}
     }
+
+    FileSink(const FileSink&) = delete;
+    FileSink& operator=(const FileSink&) = delete;
 
     auto makeObserver() {
         return rxcpp::make_observer<T>(
             [this](const T& value) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                file_ << formatValue(value) << '\n';
+                if (file_.is_open()) {
+                    file_ << formatValue(value) << '\n';
+                }
             },
             [this](std::exception_ptr e) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 try {
                     if (e) std::rethrow_exception(e);
                 } catch (const std::exception& ex) {
-                    file_ << "ERROR," << ex.what() << '\n';
+                    if (file_.is_open()) {
+                        file_ << "ERROR," << ex.what() << '\n';
+                    }
                 }
             },
             [this]() {
                 std::lock_guard<std::mutex> lock(mutex_);
-                file_.flush();
+                if (file_.is_open()) file_.flush();
             }
         );
     }
@@ -146,6 +157,7 @@ private:
                 if constexpr (requires { v.toJson(); }) return v.toJson();
                 break;
             case Format::RAW:
+            default:
                 break;
         }
         return std::string{"<no format>"};
